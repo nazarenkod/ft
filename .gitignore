@@ -1,0 +1,9 @@
+.env
+*.avm
+*.prover
+*.verifier
+outputs/
+__pycache__/
+*.pyc
+fantranslate/output/
+fantranslate/translations.db
