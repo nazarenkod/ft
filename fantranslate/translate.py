@@ -19,8 +19,10 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config
+from core import glossary_builder as gb
 from core import translator as tr
 from core.cleaner_pdf import clean_pdf_text, parse_pdf_chapters
+from core.consistency import find_inconsistencies
 from core.estimator import estimate_cost
 from core.exporter_docx import export_docx
 from core.models import Chapter, TranslationResult
@@ -28,7 +30,7 @@ from core.parser_epub import parse_epub
 from core.parser_pdf import extract_pages
 from core.storage import Storage
 
-app = typer.Typer(help="FanTranslate v1.0 — HP Edition", add_completion=False)
+app = typer.Typer(help="FanTranslate v1.0 — UA Edition (EN/RU -> UK)", add_completion=False)
 glossary_app = typer.Typer(help="Управление HP-глоссарием")
 app.add_typer(glossary_app, name="glossary")
 console = Console()
@@ -83,8 +85,16 @@ def _parse_range(spec: str, maximum: int) -> set[int]:
     return {i for i in selected if 1 <= i <= maximum}
 
 
-def _run_translation(path: Path, output: str | None, chapters_spec: str | None) -> None:
+def _run_translation(
+    path: Path,
+    output: str | None,
+    chapters_spec: str | None,
+    source_lang: str = config.SOURCE_LANG,
+    target_lang: str = config.TARGET_LANG,
+    collect_names: bool = True,
+) -> None:
     glossary = tr.load_glossary()
+    pairs = tr.glossary_pairs(glossary, source_lang, target_lang)
     chapters = _load_chapters(path)
     storage = Storage(config.DB_PATH)
     project_id = storage.get_or_create_project(path, chapters)
@@ -96,10 +106,13 @@ def _run_translation(path: Path, output: str | None, chapters_spec: str | None) 
         todo = [c for c in todo if c.idx in wanted]
 
     total_words = sum(c.word_count for c in chapters)
-    console.print("\n[bold]FanTranslate v1.0 — HP Edition[/bold]\n")
+    console.print("\n[bold]FanTranslate v1.0 — UA Edition[/bold]\n")
     console.print(f"Файл:    \"{path.name}\"")
+    console.print(
+        f"Напрям:  {config.LANGUAGES[source_lang]} -> {config.LANGUAGES[target_lang]}"
+    )
 
-    estimate = estimate_cost(todo, glossary)
+    estimate = estimate_cost(todo, pairs, source_lang, target_lang)
     marker = "" if estimate.exact else " (эвристика)"
     console.print(
         f"Глав:    {len(chapters)}  |  Слов: ~{total_words:,}  |  "
@@ -111,15 +124,46 @@ def _run_translation(path: Path, output: str | None, chapters_spec: str | None) 
         console.print("[green]Все главы уже переведены.[/green]")
     else:
         try:
-            translator = tr.Translator(glossary)
+            client = tr.make_client()
         except RuntimeError as exc:
             console.print(f"[red]{exc}[/red]")
             storage.close()
             raise typer.Exit(1)
+        if collect_names:
+            pairs = _collect_names(client, chapters, pairs, source_lang, target_lang)
+        translator = tr.Translator(pairs, source_lang, target_lang, client=client)
         _translate_with_progress(translator, storage, project_id, todo)
 
-    _export(storage, project_id, path, output)
+    _export(storage, project_id, path, output, target_lang, pairs)
     storage.close()
+
+
+def _collect_names(
+    client,
+    chapters: list[Chapter],
+    pairs: dict[str, str],
+    source_lang: str,
+    target_lang: str,
+) -> dict[str, str]:
+    """Авто-сбор повторяющихся имён: фиксирует им единый перевод на всю книгу."""
+    full_text = "\n\n".join(c.text for c in chapters)
+    existing = set(pairs) | set(pairs.values())
+    candidates = gb.extract_candidates(full_text, source_lang, existing=existing)
+    if not candidates:
+        return pairs
+    try:
+        collected = asyncio.run(
+            gb.collect_names(client, candidates, source_lang, target_lang)
+        )
+    except Exception as exc:  # noqa: BLE001 — сбор имён не критичен для перевода
+        console.print(f"[yellow]Авто-сбор имён пропущен: {exc}[/yellow]")
+        return pairs
+    if collected:
+        console.print(
+            f"[green]Зафиксировано имён для консистентности: {len(collected)}[/green]"
+        )
+    # Ручной канон приоритетнее авто-собранного.
+    return {**collected, **pairs}
 
 
 def _translate_with_progress(
@@ -163,15 +207,59 @@ def _translate_with_progress(
         )
 
 
-def _export(storage: Storage, project_id: int, path: Path, output: str | None) -> None:
+def _export(
+    storage: Storage,
+    project_id: int,
+    path: Path,
+    output: str | None,
+    target_lang: str = config.TARGET_LANG,
+    pairs: dict[str, str] | None = None,
+) -> None:
     rows = storage.get_translations(project_id)
     if not rows:
         console.print("[yellow]Нет переведённых глав — экспорт пропущен.[/yellow]")
         return
-    out_path = Path(output) if output else config.OUTPUT_DIR / f"{path.stem}_ru.docx"
-    export_docx(path.stem, [(r["title"], r["text"]) for r in rows], out_path)
+    out_path = (
+        Path(output) if output else config.OUTPUT_DIR / f"{path.stem}_{target_lang}.docx"
+    )
+    export_docx(path.stem, [(r["title"], r["text"]) for r in rows], out_path, target_lang)
     storage.set_output_path(project_id, str(out_path))
     console.print(f"[bold green]Сохранено: {out_path}[/bold green]")
+
+    if pairs:
+        _report_inconsistencies(rows, pairs, target_lang)
+
+
+def _report_inconsistencies(rows, pairs: dict[str, str], target_lang: str) -> None:
+    """Сканирует готовый перевод на разнобой написаний терминов."""
+    full_text = "\n\n".join(r["text"] for r in rows)
+    findings = find_inconsistencies(full_text, pairs.values(), target_lang)
+    if not findings:
+        return
+    console.print(
+        f"\n[yellow]⚠ Возможный разнобой написаний ({len(findings)}):[/yellow]"
+    )
+    for canonical, variants in findings:
+        console.print(
+            f"  [yellow]{canonical}[/yellow] — встречаются также: "
+            f"{', '.join(variants)}"
+        )
+    console.print(
+        "[dim]Поправьте вручную или зафиксируйте форму: "
+        "glossary add \"English\" \"Канон\" --lang " + target_lang + "[/dim]"
+    )
+
+
+def _check_langs(source_lang: str, target_lang: str) -> None:
+    if source_lang not in config.LANGUAGES or source_lang not in ("en", "ru"):
+        console.print(f"[red]Язык-источник должен быть en или ru, не {source_lang}.[/red]")
+        raise typer.Exit(1)
+    if target_lang not in config.LANGUAGES:
+        console.print(f"[red]Неизвестный язык-цель: {target_lang}.[/red]")
+        raise typer.Exit(1)
+    if source_lang == target_lang:
+        console.print("[red]Язык-источник и язык-цель совпадают.[/red]")
+        raise typer.Exit(1)
 
 
 @app.command(name="translate")
@@ -179,18 +267,32 @@ def translate_cmd(
     file: Path = typer.Argument(..., exists=True, readable=True, help="EPUB или PDF файл"),
     output: str | None = typer.Option(None, "--output", "-o", help="Путь к .docx"),
     chapters: str | None = typer.Option(None, "--chapters", help="Например: 1-5 или 1,3,7"),
+    source_lang: str = typer.Option(config.SOURCE_LANG, "--from", help="Язык-источник: en или ru"),
+    target_lang: str = typer.Option(config.TARGET_LANG, "--to", help="Язык-цель: uk"),
+    collect_names: bool = typer.Option(
+        True, "--collect-names/--no-collect-names",
+        help="Авто-сбор повторяющихся имён для консистентности перевода",
+    ),
 ):
     """Перевести фанфик (основная команда)."""
-    _run_translation(file, output, chapters)
+    _check_langs(source_lang, target_lang)
+    _run_translation(file, output, chapters, source_lang, target_lang, collect_names)
 
 
 @app.command(name="resume")
 def resume_cmd(
     file: Path = typer.Argument(..., exists=True, readable=True),
     output: str | None = typer.Option(None, "--output", "-o"),
+    source_lang: str = typer.Option(config.SOURCE_LANG, "--from", help="Язык-источник: en или ru"),
+    target_lang: str = typer.Option(config.TARGET_LANG, "--to", help="Язык-цель: uk"),
+    collect_names: bool = typer.Option(
+        True, "--collect-names/--no-collect-names",
+        help="Авто-сбор повторяющихся имён для консистентности перевода",
+    ),
 ):
     """Продолжить прерванный перевод (синоним translate: главы из БД пропускаются)."""
-    _run_translation(file, output, None)
+    _check_langs(source_lang, target_lang)
+    _run_translation(file, output, None, source_lang, target_lang, collect_names)
 
 
 @app.command(name="list")
@@ -271,22 +373,31 @@ def glossary_list():
     table = Table(title=f"HP-глоссарий ({len(glossary)} терминов)")
     table.add_column("English")
     table.add_column("Русский")
-    for en, ru in sorted(glossary.items()):
-        table.add_row(en, ru)
+    table.add_column("Українська")
+    for en, forms in sorted(glossary.items()):
+        table.add_row(en, forms.get("ru", "—"), forms.get("uk", "—"))
     console.print(table)
 
 
 @glossary_app.command(name="add")
-def glossary_add(english: str, russian: str):
-    """Добавить термин: glossary add "Snape" "Снейп"."""
+def glossary_add(
+    english: str,
+    translation: str,
+    lang: str = typer.Option("uk", "--lang", help="Язык перевода: uk или ru"),
+):
+    """Добавить/обновить термин: glossary add "Snape" "Снейп" --lang uk."""
+    if lang not in ("uk", "ru"):
+        console.print("[red]--lang должен быть uk или ru.[/red]")
+        raise typer.Exit(1)
     glossary = tr.load_glossary()
-    old = glossary.get(english)
-    glossary[english] = russian
+    forms = glossary.setdefault(english, {})
+    old = forms.get(lang)
+    forms[lang] = translation
     tr.save_glossary(glossary)
     if old:
-        console.print(f"Обновлено: {english} -> {russian} (было: {old})")
+        console.print(f"Обновлено [{lang}]: {english} -> {translation} (было: {old})")
     else:
-        console.print(f"Добавлено: {english} -> {russian}")
+        console.print(f"Добавлено [{lang}]: {english} -> {translation}")
 
 
 def main() -> None:

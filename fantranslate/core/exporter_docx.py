@@ -56,11 +56,20 @@ def _add_footer(document: Document, title: str) -> None:
     _add_field(paragraph, "PAGE")
 
 
+# Подпись на титуле и заголовок оглавления по языку-цели.
+_SUBTITLE = {
+    "uk": ("Переклад виконано FanTranslate", "Зміст"),
+    "ru": ("Перевод выполнен FanTranslate", "Оглавление"),
+}
+
+
 def export_docx(
     title: str,
     chapters: list[tuple[str, str]],  # (заголовок главы, переведённый текст)
     output_path: Path,
+    target_lang: str = "uk",
 ) -> Path:
+    subtitle_text, toc_label = _SUBTITLE.get(target_lang, _SUBTITLE["uk"])
     document = Document()
     _set_base_style(document)
     _add_footer(document, title)
@@ -68,13 +77,13 @@ def export_docx(
     # Титул
     heading = document.add_heading(title, level=0)
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle = document.add_paragraph("Перевод выполнен FanTranslate")
+    subtitle = document.add_paragraph(subtitle_text)
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle.paragraph_format.first_line_indent = None
     document.add_page_break()
 
     # Оглавление: поле TOC, Word построит его по заголовкам при открытии
-    toc_title = document.add_paragraph("Оглавление")
+    toc_title = document.add_paragraph(toc_label)
     toc_title.runs[0].bold = True
     toc_title.paragraph_format.first_line_indent = None
     toc_paragraph = document.add_paragraph()

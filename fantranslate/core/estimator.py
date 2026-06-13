@@ -22,10 +22,15 @@ def _heuristic_tokens(words: int) -> int:
     return int(words * config.WORDS_TO_TOKENS)
 
 
-def estimate_cost(chapters: list[Chapter], glossary: dict[str, str]) -> Estimate:
+def estimate_cost(
+    chapters: list[Chapter],
+    pairs: dict[str, str],
+    source_lang: str = config.SOURCE_LANG,
+    target_lang: str = config.TARGET_LANG,
+) -> Estimate:
     """Считает входные токены через count_tokens API; без ключа/сети — эвристикой."""
     total_words = sum(c.word_count for c in chapters)
-    system_blocks = build_system_blocks(glossary)
+    system_blocks = build_system_blocks(pairs, source_lang, target_lang)
 
     input_tokens = 0
     exact = False

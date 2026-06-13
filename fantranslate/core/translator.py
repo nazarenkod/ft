@@ -11,48 +11,116 @@ import anthropic
 import config
 from core.models import Chapter, TranslationResult
 
-STYLE_INSTRUCTIONS = """\
-You are a professional literary translator. Translate English Harry Potter \
-fan fiction into Russian.
+# Дополнительные правила для конкретного языка-цели.
+TARGET_RULES = {
+    "uk": (
+        "- Translate into natural, fluent literary Ukrainian.\n"
+        "- Use the vocative case (кличний відмінок) for direct address in dialogue "
+        "(e.g. Гаррі -> Гаррі, мамо, Северусе).\n"
+        "- Use the apostrophe correctly (ім'я, м'яч) and the letter ґ where the "
+        "canon requires it.\n"
+        "- Do NOT russify: avoid surzhyk and word-for-word calques from Russian."
+    ),
+    "ru": (
+        "- Translate into natural, fluent literary Russian.\n"
+        "- Use the canonical Rosman-edition terminology from the glossary."
+    ),
+}
 
-Rules:
-- Preserve the author's style, tone, pacing and intonation.
-- Translate dialogue naturally; use Russian punctuation for dialogue (em dash).
-- Use the canonical Russian terminology from the glossary below (official \
-Rosman edition). Apply glossary terms in all grammatical forms.
-- Keep paragraph breaks exactly as in the source: one source paragraph -> \
-one translated paragraph.
-- Output ONLY the translation, no comments, notes or preface.\
-"""
+
+def build_style_instructions(source_lang: str, target_lang: str) -> str:
+    """Системные инструкции переводчика под выбранное направление."""
+    src = config.LANGUAGES.get(source_lang, source_lang)
+    tgt = config.LANGUAGES.get(target_lang, target_lang)
+    extra = TARGET_RULES.get(target_lang, "")
+    rules = [
+        "- Preserve the author's style, tone, pacing and intonation.",
+        f"- Translate dialogue naturally; use {tgt} punctuation for dialogue (em dash).",
+        f"- Use the canonical {tgt} terminology from the glossary below. "
+        "Apply glossary terms in all grammatical forms.",
+    ]
+    if extra:
+        rules.append(extra)
+    rules.append(
+        "- Keep paragraph breaks exactly as in the source: one source paragraph -> "
+        "one translated paragraph."
+    )
+    rules.append("- Output ONLY the translation, no comments, notes or preface.")
+    return (
+        f"You are a professional literary translator. Translate {src} Harry Potter "
+        f"fan fiction into {tgt}.\n\nRules:\n" + "\n".join(rules)
+    )
 
 
-def load_glossary(path: Path | None = None) -> dict[str, str]:
+def load_glossary(path: Path | None = None) -> dict[str, dict[str, str]]:
+    """Канонический глоссарий: {English_key: {"ru": ..., "uk": ...}}."""
     with open(path or config.GLOSSARY_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_glossary(glossary: dict[str, str], path: Path | None = None) -> None:
+def save_glossary(
+    glossary: dict[str, dict[str, str]], path: Path | None = None
+) -> None:
+    ordered = {
+        en: dict(sorted(forms.items())) for en, forms in sorted(glossary.items())
+    }
     with open(path or config.GLOSSARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(dict(sorted(glossary.items())), f, ensure_ascii=False, indent=2)
+        json.dump(ordered, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
 
-def render_glossary(glossary: dict[str, str]) -> str:
+def glossary_pairs(
+    glossary: dict[str, dict[str, str]], source_lang: str, target_lang: str
+) -> dict[str, str]:
+    """source-термин -> target-термин для выбранного направления.
+
+    Английский канон берётся из ключа, поэтому EN->UK даёт Hogwarts->Гоґвортс,
+    а RU->UK — Хогвартс->Гоґвортс (русский источник матчится с глоссарием).
+    """
+    pairs: dict[str, str] = {}
+    for en, forms in glossary.items():
+        all_forms = {"en": en, **forms}
+        src = all_forms.get(source_lang)
+        tgt = all_forms.get(target_lang)
+        if src and tgt:
+            pairs[src] = tgt
+    return pairs
+
+
+def render_glossary(
+    pairs: dict[str, str], source_lang: str = "en", target_lang: str = "uk"
+) -> str:
     # Детерминированный порядок: иначе префикс меняется и кэш не переиспользуется
-    lines = [f"{en} -> {ru}" for en, ru in sorted(glossary.items())]
-    return "GLOSSARY (English -> Russian):\n" + "\n".join(lines)
+    src = config.LANGUAGES.get(source_lang, source_lang)
+    tgt = config.LANGUAGES.get(target_lang, target_lang)
+    lines = [f"{s} -> {t}" for s, t in sorted(pairs.items())]
+    return f"GLOSSARY ({src} -> {tgt}):\n" + "\n".join(lines)
 
 
-def build_system_blocks(glossary: dict[str, str]) -> list[dict]:
+def build_system_blocks(
+    pairs: dict[str, str],
+    source_lang: str = config.SOURCE_LANG,
+    target_lang: str = config.TARGET_LANG,
+) -> list[dict]:
     """Стабильный system prompt; кэшируется целиком по последнему блоку."""
     return [
-        {"type": "text", "text": STYLE_INSTRUCTIONS},
+        {"type": "text", "text": build_style_instructions(source_lang, target_lang)},
         {
             "type": "text",
-            "text": render_glossary(glossary),
+            "text": render_glossary(pairs, source_lang, target_lang),
             "cache_control": {"type": "ephemeral"},
         },
     ]
+
+
+def make_client() -> "anthropic.AsyncAnthropic":
+    """Создаёт async-клиент Claude; падает с понятной ошибкой без ключа."""
+    if not config.ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY не задан. Создайте fantranslate/.env "
+            "со строкой ANTHROPIC_API_KEY=sk-ant-..."
+        )
+    return anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
 
 
 def split_into_chunks(
@@ -126,16 +194,15 @@ def build_chunk_prompt(chapter_title: str, chunk: list[str], overlap_count: int)
 
 
 class Translator:
-    def __init__(self, glossary: dict[str, str], client: anthropic.AsyncAnthropic | None = None):
-        if client is None:
-            if not config.ANTHROPIC_API_KEY:
-                raise RuntimeError(
-                    "ANTHROPIC_API_KEY не задан. Создайте fantranslate/.env "
-                    "со строкой ANTHROPIC_API_KEY=sk-ant-..."
-                )
-            client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-        self.client = client
-        self.system_blocks = build_system_blocks(glossary)
+    def __init__(
+        self,
+        pairs: dict[str, str],
+        source_lang: str = config.SOURCE_LANG,
+        target_lang: str = config.TARGET_LANG,
+        client: anthropic.AsyncAnthropic | None = None,
+    ):
+        self.client = client if client is not None else make_client()
+        self.system_blocks = build_system_blocks(pairs, source_lang, target_lang)
         self.semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
 
     async def _request(self, user_text: str):

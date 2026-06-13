@@ -66,7 +66,7 @@ def fast_retries(monkeypatch):
 
 def test_request_structure_uses_cached_system_prompt():
     client = FakeClient()
-    translator = Translator({"Snape": "Снегг"}, client=client)
+    translator = Translator({"Snape": "Снейп"}, "en", "uk", client=client)
     chapter = Chapter(idx=1, title="One", paragraphs=["Harry met Snape."])
     asyncio.run(translator.translate_chapter(chapter))
 
@@ -76,7 +76,8 @@ def test_request_structure_uses_cached_system_prompt():
     assert request["output_config"] == {"effort": "low"}
     system = request["system"]
     assert system[-1]["cache_control"] == {"type": "ephemeral"}
-    assert "Snape -> Снегг" in system[-1]["text"]
+    assert "Snape -> Снейп" in system[-1]["text"]
+    assert "Ukrainian" in system[0]["text"]
     assert "Harry met Snape." in request["messages"][0]["content"]
 
 
