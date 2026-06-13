@@ -92,6 +92,7 @@ def _run_translation(
     source_lang: str = config.SOURCE_LANG,
     target_lang: str = config.TARGET_LANG,
     collect_names: bool = True,
+    model: str = config.MODEL,
 ) -> None:
     glossary = tr.load_glossary()
     pairs = tr.glossary_pairs(glossary, source_lang, target_lang)
@@ -111,8 +112,9 @@ def _run_translation(
     console.print(
         f"Напрям:  {config.LANGUAGES[source_lang]} -> {config.LANGUAGES[target_lang]}"
     )
+    console.print(f"Модель:  {model}")
 
-    estimate = estimate_cost(todo, pairs, source_lang, target_lang)
+    estimate = estimate_cost(todo, pairs, source_lang, target_lang, model)
     marker = "" if estimate.exact else " (эвристика)"
     console.print(
         f"Глав:    {len(chapters)}  |  Слов: ~{total_words:,}  |  "
@@ -131,7 +133,7 @@ def _run_translation(
             raise typer.Exit(1)
         if collect_names:
             pairs = _collect_names(client, chapters, pairs, source_lang, target_lang)
-        translator = tr.Translator(pairs, source_lang, target_lang, client=client)
+        translator = tr.Translator(pairs, source_lang, target_lang, client=client, model=model)
         _translate_with_progress(translator, storage, project_id, todo)
 
     _export(storage, project_id, path, output, target_lang, pairs)
@@ -250,6 +252,11 @@ def _report_inconsistencies(rows, pairs: dict[str, str], target_lang: str) -> No
     )
 
 
+def _resolve_model(quality: str) -> str:
+    """Преобразует --quality в ID модели; неизвестное значение = balanced."""
+    return config.QUALITY_MODELS.get(quality, config.MODEL)
+
+
 def _check_langs(source_lang: str, target_lang: str) -> None:
     if source_lang not in config.LANGUAGES or source_lang not in ("en", "ru"):
         console.print(f"[red]Язык-источник должен быть en или ru, не {source_lang}.[/red]")
@@ -273,10 +280,16 @@ def translate_cmd(
         True, "--collect-names/--no-collect-names",
         help="Авто-сбор повторяющихся имён для консистентности перевода",
     ),
+    quality: str = typer.Option(
+        "balanced", "--quality", "-q",
+        help="Качество/стоимость: fast (Haiku, ~$0.3/100k слов), "
+             "balanced (Sonnet, ~$1, по умолчанию), max (Opus, ~$2)",
+    ),
 ):
     """Перевести фанфик (основная команда)."""
     _check_langs(source_lang, target_lang)
-    _run_translation(file, output, chapters, source_lang, target_lang, collect_names)
+    model = _resolve_model(quality)
+    _run_translation(file, output, chapters, source_lang, target_lang, collect_names, model)
 
 
 @app.command(name="resume")
@@ -289,10 +302,15 @@ def resume_cmd(
         True, "--collect-names/--no-collect-names",
         help="Авто-сбор повторяющихся имён для консистентности перевода",
     ),
+    quality: str = typer.Option(
+        "balanced", "--quality", "-q",
+        help="Качество/стоимость: fast (Haiku), balanced (Sonnet), max (Opus)",
+    ),
 ):
     """Продолжить прерванный перевод (синоним translate: главы из БД пропускаются)."""
     _check_langs(source_lang, target_lang)
-    _run_translation(file, output, None, source_lang, target_lang, collect_names)
+    model = _resolve_model(quality)
+    _run_translation(file, output, None, source_lang, target_lang, collect_names, model)
 
 
 @app.command(name="list")

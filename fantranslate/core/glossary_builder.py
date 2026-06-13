@@ -141,7 +141,7 @@ async def collect_names(
     candidates: list[str],
     source_lang: str,
     target_lang: str,
-    model: str = config.MODEL,
+    model: str = config.UTILITY_MODEL,
 ) -> dict[str, str]:
     """Один запрос к модели: единый перевод для каждого имени-кандидата."""
     if not candidates:

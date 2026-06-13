@@ -27,10 +27,12 @@ def estimate_cost(
     pairs: dict[str, str],
     source_lang: str = config.SOURCE_LANG,
     target_lang: str = config.TARGET_LANG,
+    model: str = config.MODEL,
 ) -> Estimate:
     """Считает входные токены через count_tokens API; без ключа/сети — эвристикой."""
     total_words = sum(c.word_count for c in chapters)
     system_blocks = build_system_blocks(pairs, source_lang, target_lang)
+    prices = config.MODEL_PRICES.get(model, config.MODEL_PRICES[config.MODEL])
 
     input_tokens = 0
     exact = False
@@ -41,7 +43,7 @@ def estimate_cost(
             # они читаются из кэша (~0.1x), поэтому для оценки берём полный
             # тариф один раз и cache-read для остальных запросов.
             system_tokens = client.messages.count_tokens(
-                model=config.MODEL,
+                model=model,
                 system=system_blocks,
                 messages=[{"role": "user", "content": "x"}],
             ).input_tokens
@@ -50,7 +52,7 @@ def estimate_cost(
                 for chunk, overlap_count in split_into_chunks(chapter.paragraphs):
                     prompt = build_chunk_prompt(chapter.title, chunk, overlap_count)
                     chunk_tokens = client.messages.count_tokens(
-                        model=config.MODEL,
+                        model=model,
                         messages=[{"role": "user", "content": prompt}],
                     ).input_tokens
                     input_tokens += chunk_tokens
@@ -69,8 +71,8 @@ def estimate_cost(
 
     output_tokens = int(_heuristic_tokens(total_words) * config.OUTPUT_TOKENS_RATIO)
     cost = (
-        input_tokens * config.PRICE_INPUT_PER_MTOK
-        + output_tokens * config.PRICE_OUTPUT_PER_MTOK
+        input_tokens * prices["input"]
+        + output_tokens * prices["output"]
     ) / 1_000_000
     return Estimate(
         total_words=total_words,

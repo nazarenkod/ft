@@ -164,17 +164,20 @@ def split_into_chunks(
     return chunks
 
 
-def compute_cost(usage) -> float:
+def compute_cost(usage, model: str = config.MODEL) -> float:
     """Точная стоимость запроса по полям usage."""
+    prices = config.MODEL_PRICES.get(model, config.MODEL_PRICES[config.MODEL])
+    price_in = prices["input"]
+    price_out = prices["output"]
     inp = getattr(usage, "input_tokens", 0) or 0
     out = getattr(usage, "output_tokens", 0) or 0
     cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
     cost = (
-        inp * config.PRICE_INPUT_PER_MTOK
-        + cache_write * config.PRICE_INPUT_PER_MTOK * config.CACHE_WRITE_MULTIPLIER
-        + cache_read * config.PRICE_INPUT_PER_MTOK * config.CACHE_READ_MULTIPLIER
-        + out * config.PRICE_OUTPUT_PER_MTOK
+        inp * price_in
+        + cache_write * price_in * config.CACHE_WRITE_MULTIPLIER
+        + cache_read * price_in * config.CACHE_READ_MULTIPLIER
+        + out * price_out
     )
     return cost / 1_000_000
 
@@ -200,8 +203,10 @@ class Translator:
         source_lang: str = config.SOURCE_LANG,
         target_lang: str = config.TARGET_LANG,
         client: anthropic.AsyncAnthropic | None = None,
+        model: str = config.MODEL,
     ):
         self.client = client if client is not None else make_client()
+        self.model = model
         self.system_blocks = build_system_blocks(pairs, source_lang, target_lang)
         self.semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
 
@@ -211,7 +216,7 @@ class Translator:
         for attempt in range(config.RETRY_ATTEMPTS):
             try:
                 async with self.client.messages.stream(
-                    model=config.MODEL,
+                    model=self.model,
                     max_tokens=config.MAX_TOKENS,
                     thinking={"type": "disabled"},
                     output_config={"effort": "low"},
@@ -246,7 +251,7 @@ class Translator:
                     getattr(usage, "cache_creation_input_tokens", 0) or 0
                 ) + (getattr(usage, "cache_read_input_tokens", 0) or 0)
                 output_tokens += usage.output_tokens or 0
-                cost += compute_cost(usage)
+                cost += compute_cost(usage, self.model)
 
             return TranslationResult(
                 chapter_idx=chapter.idx,

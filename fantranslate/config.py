@@ -1,4 +1,4 @@
-"""Конфигурация FanTranslate: API-ключ, модель, лимиты, цены."""
+"""Конфигурация FanTranslate: API-ключ, модели, лимиты, цены."""
 
 import os
 from pathlib import Path
@@ -11,8 +11,16 @@ load_dotenv(BASE_DIR / ".env")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-# Модель перевода (выбор PRD: баланс качества и цены)
-MODEL = "claude-sonnet-4-6"
+# Модели по уровням качества (флаг --quality)
+QUALITY_MODELS = {
+    "fast":     "claude-haiku-4-5",   # быстро и дёшево (~в 3x дешевле Sonnet)
+    "balanced": "claude-sonnet-4-6",  # рекомендуется: цена/качество
+    "max":      "claude-opus-4-8",    # максимальное литературное качество
+}
+# Дефолт для перевода глав
+MODEL = QUALITY_MODELS["balanced"]
+# Утилитарная модель: структурные задачи (авто-сбор имён, JSON)
+UTILITY_MODEL = "claude-haiku-4-5"
 
 # Языки: источник (en/ru) и цель (uk). Меняются флагами --from/--to.
 SOURCE_LANG = "en"
@@ -37,9 +45,15 @@ MAX_TOKENS = 16000
 RETRY_ATTEMPTS = 3
 RETRY_BASE_DELAY = 2.0
 
-# Цены claude-sonnet-4-6, $ за миллион токенов
-PRICE_INPUT_PER_MTOK = 3.00
-PRICE_OUTPUT_PER_MTOK = 15.00
+# Цены по моделям, $ за миллион токенов
+MODEL_PRICES: dict[str, dict[str, float]] = {
+    "claude-haiku-4-5":  {"input": 1.00, "output": 5.00},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    "claude-opus-4-8":   {"input": 5.00, "output": 25.00},
+}
+# Обратная совместимость: цены текущей модели по умолчанию
+PRICE_INPUT_PER_MTOK = MODEL_PRICES[MODEL]["input"]
+PRICE_OUTPUT_PER_MTOK = MODEL_PRICES[MODEL]["output"]
 CACHE_WRITE_MULTIPLIER = 1.25  # запись в кэш
 CACHE_READ_MULTIPLIER = 0.10   # чтение из кэша
 
